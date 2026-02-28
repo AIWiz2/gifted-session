@@ -1,191 +1,135 @@
-const {     
-    ecowscoId,    
-    removeFile,    
-    generateRandomCode    
-} = require('../ecowsco');    
-const zlib = require('zlib');    
-const express = require('express');    
-const fs = require('fs');    
-const path = require('path');    
-let router = express.Router();    
-const pino = require("pino");    
-const { sendButtons } = require('gifted-btns'); // keep gifted-btns    
-const {    
-    default: ecowscoConnect,    
-    useMultiFileAuthState,    
-    delay,    
-    downloadContentFromMessage,     
-    generateWAMessageFromContent,    
-    normalizeMessageContent,    
-    fetchLatestBaileysVersion,    
-    makeCacheableSignalKeyStore,    
-    Browsers    
-} = require("@whiskeysockets/baileys");    
-    
-const sessionDir = path.join(__dirname, "session");    
-    
-router.get('/', async (req, res) => {    
-    const id = ecowscoId();    
-    let num = req.query.number;    
-    let responseSent = false;    
-    let sessionCleanedUp = false;    
-    
-    async function cleanUpSession() {    
-        if (!sessionCleanedUp) {    
-            try {    
-                await removeFile(path.join(sessionDir, id));    
-            } catch (cleanupError) {    
-                console.error("Cleanup error:", cleanupError);    
-            }    
-            sessionCleanedUp = true;    
-        }    
-    }    
-    
-    async function ECOWSCO_PAIR_CODE() {    
-        const { version } = await fetchLatestBaileysVersion();    
-        console.log("Baileys version:", version);    
-        const { state, saveCreds } = await useMultiFileAuthState(path.join(sessionDir, id));    
-        try {    
-            let Bot = ecowscoConnect({    
-                version,    
-                auth: {    
-                    creds: state.creds,    
-                    keys: makeCacheableSignalKeyStore(state.keys, pino({ level: "fatal" }).child({ level: "fatal" })),    
-                },    
-                printQRInTerminal: false,    
-                logger: pino({ level: "fatal" }).child({ level: "fatal" }),    
-                browser: Browsers.macOS("Safari"),    
-                syncFullHistory: false,    
-                generateHighQualityLinkPreview: true,    
-                shouldIgnoreJid: jid => !!jid?.endsWith('@g.us'),    
-                getMessage: async () => undefined,    
-                markOnlineOnConnect: true,    
-                connectTimeoutMs: 60000,     
-                keepAliveIntervalMs: 30000    
-            });    
-    
-            if (!Bot.authState.creds.registered) {    
-                await delay(1500);    
-                num = num.replace(/[^0-9]/g, '');    
-                    
-                const randomCode = generateRandomCode();    
-                const code = await Bot.requestPairingCode(num, randomCode);    
-                    
-                if (!responseSent && !res.headersSent) {    
-                    res.json({ code });    
-                    responseSent = true;    
-                }    
-            }    
-    
-            Bot.ev.on('creds.update', saveCreds);    
-            Bot.ev.on("connection.update", async (s) => {    
-                const { connection, lastDisconnect } = s;    
-    
-                if (connection === "open") {    
-                    await delay(50000);    
-                        
-                    let sessionData = null;    
-                    let attempts = 0;    
-                    const maxAttempts = 15;    
-                        
-                    while (attempts < maxAttempts && !sessionData) {    
-                        try {    
-                            const credsPath = path.join(sessionDir, id, "creds.json");    
-                            if (fs.existsSync(credsPath)) {    
-                                const data = fs.readFileSync(credsPath);    
-                                if (data && data.length > 100) {    
-                                    sessionData = data;    
-                                    break;    
-                                }    
-                            }    
-                            await delay(8000);    
-                            attempts++;    
-                        } catch (readError) {    
-                            console.error("Read error:", readError);    
-                            await delay(2000);    
-                            attempts++;    
-                        }    
-                    }    
-    
-                    if (!sessionData) {    
-                        await cleanUpSession();    
-                        return;    
-                    }    
-                        
-                    try {    
-                        let compressedData = zlib.gzipSync(sessionData);    
-                        let b64data = compressedData.toString('base64');    
-                        await delay(5000);     
-    
-                        let sessionSent = false;    
-                        let sendAttempts = 0;    
-                        const maxSendAttempts = 5;    
-    
-                        while (sendAttempts < maxSendAttempts && !sessionSent) {    
-                            try {    
-                                await sendButtons(Bot, Bot.user.id, {    
-                                    title: '',    
-                                    text: 'ECOWSCO~' + b64data,    
-                                    footer: `> *ᴘᴏᴡᴇʀᴇᴅ ʙʏ ᴇᴄᴏᴡsᴄᴏ ᴍᴅ*`,    
-                                    buttons: [    
-                                        {     
-                                            name: 'cta_copy',     
-                                            buttonParamsJson: JSON.stringify({     
-                                                display_text: 'Copy Session',     
-                                                copy_code: 'ECOWSCO~' + b64data     
-                                            })     
-                                        }    
-                                    ]    
-                                });    
-                                sessionSent = true;    
-                            } catch (sendError) {    
-                                console.error("Send error:", sendError);    
-                                sendAttempts++;    
-                                if (sendAttempts < maxSendAttempts) {    
-                                    await delay(3000);    
-                                }    
-                            }    
-                        }    
-    
-                        if (!sessionSent) {    
-                            await cleanUpSession();    
-                            return;    
-                        }    
-    
-                        await delay(3000);    
-                        await Bot.ws.close();    
-                    } catch (sessionError) {    
-                        console.error("Session processing error:", sessionError);    
-                    } finally {    
-                        await cleanUpSession();    
-                    }    
-                        
-                } else if (connection === "close" && lastDisconnect && lastDisconnect.error && lastDisconnect.error.output.statusCode != 401) {    
-                    console.log("Reconnecting...");    
-                    await delay(5000);    
-                    ECOWSCO_PAIR_CODE();    
-                }    
-            });    
-    
-        } catch (err) {    
-            console.error("Main error:", err);    
-            if (!responseSent && !res.headersSent) {    
-                res.status(500).json({ code: "Service is Currently Unavailable" });    
-                responseSent = true;    
-            }    
-            await cleanUpSession();    
-        }    
-    }    
-    
-    try {    
-        await ECOWSCO_PAIR_CODE();    
-    } catch (finalError) {    
-        console.error("Final error:", finalError);    
-        await cleanUpSession();    
-        if (!responseSent && !res.headersSent) {    
-            res.status(500).json({ code: "Service Error" });    
-        }    
-    }    
-});    
-    
+const {
+    ecowscoId,
+    removeFile
+} = require('../ecowsco');
+
+const express = require('express');
+const path = require('path');
+const fs = require('fs');
+const zlib = require('zlib');
+const pino = require("pino");
+const { sendButtons } = require('gifted-btns');
+
+const {
+    default: ecowscoConnect,
+    useMultiFileAuthState,
+    delay,
+    fetchLatestBaileysVersion
+} = require("@whiskeysockets/baileys");
+
+let router = express.Router();
+const sessionDir = path.join(__dirname, "session");
+
+router.get('/', async (req, res) => {
+    const number = req.query.number;
+
+    if (!number) {
+        return res.status(400).json({
+            error: "Phone number is required. Use ?number=234XXXXXXXXXX"
+        });
+    }
+
+    const id = ecowscoId();
+    let responseSent = false;
+    let sessionCleanedUp = false;
+
+    async function cleanUpSession() {
+        if (!sessionCleanedUp) {
+            await removeFile(path.join(sessionDir, id));
+            sessionCleanedUp = true;
+        }
+    }
+
+    async function ECOWSCO_PAIR_CODE() {
+        const { version } = await fetchLatestBaileysVersion();
+        const { state, saveCreds } =
+            await useMultiFileAuthState(path.join(sessionDir, id));
+
+        try {
+            const Bot = ecowscoConnect({
+                version,
+                auth: state,
+                printQRInTerminal: false,
+                logger: pino({ level: "silent" })
+            });
+
+            Bot.ev.on('creds.update', saveCreds);
+
+            Bot.ev.on("connection.update", async ({ connection }) => {
+
+                if (connection === "open") {
+
+                    await delay(10000);
+
+                    let sessionData = null;
+                    const credsPath = path.join(sessionDir, id, "creds.json");
+
+                    if (fs.existsSync(credsPath)) {
+                        const data = fs.readFileSync(credsPath);
+                        if (data.length > 100) {
+                            sessionData = data;
+                        }
+                    }
+
+                    if (!sessionData) {
+                        await cleanUpSession();
+                        return;
+                    }
+
+                    const compressed = zlib.gzipSync(sessionData);
+                    const base64 = compressed.toString('base64');
+                    const finalSession = "ECOWSCO~" + base64;
+
+                    await sendButtons(Bot, Bot.user.id, {
+                        title: '',
+                        text: finalSession,
+                        footer: `> *POWERED BY ECOWSCO MD*`,
+                        buttons: [
+                            {
+                                name: 'cta_copy',
+                                buttonParamsJson: JSON.stringify({
+                                    display_text: 'Copy Session',
+                                    copy_code: finalSession
+                                })
+                            }
+                        ]
+                    });
+
+                    await delay(2000);
+                    await Bot.ws.close();
+                    await cleanUpSession();
+                }
+            });
+
+            const pairingCode = await Bot.requestPairingCode(number);
+
+            if (!responseSent) {
+                res.json({
+                    pairingCode: pairingCode
+                });
+                responseSent = true;
+            }
+
+        } catch (error) {
+            if (!responseSent) {
+                res.status(500).json({
+                    error: "Pairing service unavailable"
+                });
+            }
+            await cleanUpSession();
+        }
+    }
+
+    try {
+        await ECOWSCO_PAIR_CODE();
+    } catch (err) {
+        await cleanUpSession();
+        if (!responseSent) {
+            res.status(500).json({
+                error: "Service Error"
+            });
+        }
+    }
+});
+
 module.exports = router;
